@@ -74,7 +74,8 @@ function configureForCity() {
   controls.update();
 
   document.getElementById('model-info').textContent =
-    `${city.modelName}｜衝突メッシュ ${city.modelStats.meshes}・約${city.modelStats.size}m`;
+    `${city.modelName}｜衝突メッシュ ${city.modelStats.meshes}・約${city.modelStats.size}m`
+    + (city.addedGround ? '・地面を自動追加' : '');
 }
 
 // =====================================================================
@@ -424,7 +425,7 @@ function updateClockLabels() {
 //  太陽（光源）の時刻連動
 // =====================================================================
 const _dayCol = new THREE.Color(0x0d141f);
-const _nightCol = new THREE.Color(0x05070d);
+const _nightCol = new THREE.Color(0x0c1422);
 const _tmpCol = new THREE.Color();
 const _sunDir = new THREE.Vector3();
 function updateSun(min) {
@@ -441,9 +442,9 @@ function updateSun(min) {
   );
   sun.target.position.copy(city.center);
 
-  // 強度（夜は弱い月明かり程度）
-  sun.intensity = 0.12 + day * 1.5;
-  hemi.intensity = 0.18 + day * 0.72;
+  // 強度（夜は太陽光ほぼ無し。街灯と環境光で見える程度の明るさを確保）
+  sun.intensity = 0.05 + day * 1.5;
+  hemi.intensity = 0.34 + day * 0.62;
 
   // 地平線近くは暖色（朝焼け・夕焼け）
   const warm = 1 - clamp(elev / 0.45, 0, 1);
@@ -454,6 +455,11 @@ function updateSun(min) {
   _tmpCol.copy(_nightCol).lerp(_dayCol, day);
   scene.background.copy(_tmpCol);
   scene.fog.color.copy(_tmpCol);
+
+  // 暗さに応じて街灯を自動点灯/消灯（夕方〜明け方）。
+  // elev≈0.2(≒17時/7時)で点き始め、日没後に全点灯。
+  const night = clamp((0.2 - elev) / 0.28, 0, 1);
+  city.updateLamps(night);
 }
 
 // =====================================================================
@@ -504,7 +510,7 @@ function lerpAngle(a, b, t) {
 }
 
 // デバッグ/外部連携用フック
-window.__viz = { camera, controls, city, crowd, furniture, sim, enterFPV, exitFPV, setPlacement, updateSun };
+window.__viz = { THREE, camera, controls, city, crowd, furniture, sim, enterFPV, exitFPV, setPlacement, updateSun };
 
 // 起動
 $('speed-label').textContent = '×' + sim.speed;

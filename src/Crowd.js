@@ -59,7 +59,8 @@ export class Crowd {
       const t = AVATAR_TYPES[typeIndex];
       const avatar = createAvatar(typeIndex);
 
-      const baseSpeed = ({ '子ども': 1.05, '高齢者': 0.85, '成人': 1.35 })[t.age] * (t.wheelchair ? 0.85 : 1);
+      // 実寸の歩行速度(m/s)。成人≒4.5km/h、高齢者・子どもはやや遅め。
+      const baseSpeed = ({ '子ども': 1.05, '高齢者': 1.0, '成人': 1.25 })[t.age] * (t.wheelchair ? 0.9 : 1);
 
       const home = this.city.randomWalkablePoint();
       const schedule = this._makeSchedule(home);
@@ -171,8 +172,9 @@ export class Crowd {
    * @param timeScale 時間の速さ（sim分/実秒）。0で停止。
    */
   update(dt, simClock, timeScale) {
-    // 時間の速さに応じて歩行者の見た目の速度をスケール（高速時も破綻しない範囲）
-    const speedFactor = timeScale <= 0 ? 0 : clamp(timeScale / 20, 0.25, 6);
+    // 歩行者の見た目の速度倍率。時間を進めている間は最低でも等倍（≒実寸の4〜4.5km/h）を
+    // 確保し、低速設定でも“歩いている”速さを保つ。高速時は最大6倍まで加速。
+    const speedFactor = timeScale <= 0 ? 0 : clamp(timeScale / 60, 1, 6);
 
     for (const a of this.agents) {
       // 着席中：滞在時間を消費し、座り姿勢のまま固定（移動・スケジュールは凍結）

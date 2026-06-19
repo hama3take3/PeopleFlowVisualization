@@ -32,6 +32,10 @@ export class CityModel {
     this.size = 100;                // 街のおおよその一辺
     this.center = new THREE.Vector3();
     this.destinations = [];         // 目的地(POI)候補
+    this.lampBulbs = [];            // 街灯の発光マテリアル（点灯/消灯制御用）
+    this.lampLights = [];           // 街灯の点光源
+    this.lampGroup = null;
+    this.addedGround = false;       // 地面が無いモデルに自動追加したか
     this._raycaster = new THREE.Raycaster();
     this._raycaster.firstHitOnly = true;
   }
@@ -50,6 +54,10 @@ export class CityModel {
       this.collisionHelper = null;
     }
     this.destinations = [];
+    this.lampBulbs = [];
+    this.lampLights = [];
+    this.lampGroup = null;
+    this.addedGround = false;
   }
 
   /** ファイル(File)からモデルを読み込む */
@@ -127,7 +135,109 @@ export class CityModel {
     });
 
     this.root.add(object);
+
+    // 地面（床）を持たないモデルなら自動で地面を追加（歩行可能面を保証）
+    const tmpBox = new THREE.Box3().setFromObject(this.root);
+    const tmpSize = tmpBox.getSize(new THREE.Vector3());
+    const sizeGuess = Math.max(tmpSize.x, tmpSize.z) || 1;
+    this.addedGround = false;
+    if (!this._hasGroundLikeMesh(sizeGuess)) {
+      this._addGroundPlane(tmpBox, sizeGuess);
+      this.addedGround = true;
+    }
+
     this._finalizeBounds(name);
+  }
+
+  /** 広く平らな（地面とみなせる）メッシュが存在するか */
+  _hasGroundLikeMesh(size) {
+    let found = false;
+    this.root.traverse((o) => {
+      if (!o.isMesh || found) return;
+      const bb = new THREE.Box3().setFromObject(o);
+      const s = bb.getSize(new THREE.Vector3());
+      if (s.y < size * 0.04 && (s.x > size * 0.3 || s.z > size * 0.3)) found = true;
+    });
+    return found;
+  }
+
+  /** 地面が無いモデル用に床面を追加 */
+  _addGroundPlane(box, size) {
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(size * 1.2, size * 1.2),
+      new THREE.MeshStandardMaterial({ color: 0x3a4250, roughness: 1 })
+    );
+    plane.rotation.x = -Math.PI / 2;
+    plane.position.set((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+    plane.receiveShadow = true;
+    plane.userData.isAddedGround = true;
+    plane.geometry.computeBoundsTree();
+    this.root.add(plane);
+  }
+
+  /** 街灯を配置（グリッド状。建物内は避ける） */
+  _buildStreetLights() {
+    this.lampBulbs = [];
+    this.lampLights = [];
+    const grp = new THREE.Group();
+    grp.name = 'streetlights';
+    const size = this.size;
+    const spacing = clamp(size / 7, 14, 45);
+    const half = size * 0.46;
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x2c3038, roughness: 0.7, metalness: 0.4 });
+
+    const candidates = [];
+    for (let x = -half; x <= half; x += spacing)
+      for (let z = -half; z <= half; z += spacing)
+        candidates.push([this.center.x + x, this.center.z + z]);
+
+    const maxPosts = 80;
+    const lightEvery = Math.max(1, Math.ceil(candidates.length / 22)); // 点光源は最大~22個
+    let placed = 0, idx = 0;
+    for (const [cx, cz] of candidates) {
+      if (placed >= maxPosts) break;
+      const p = { x: cx, z: cz };
+      if (!this.inBounds(p) || this.isInsideBuilding(new THREE.Vector3(cx, 0, cz))) { idx++; continue; }
+      const gy = this.groundHeightAt(cx, cz);
+      const lamp = this._makeLampPost(postMat);
+      lamp.position.set(cx, gy, cz);
+      grp.add(lamp);
+      placed++;
+      if (idx % lightEvery === 0 && this.lampLights.length < 22) {
+        const light = new THREE.PointLight(0xffd28a, 0, spacing * 2.4, 2);
+        light.position.set(cx, gy + 3.7, cz);
+        grp.add(light);
+        this.lampLights.push(light);
+      }
+      idx++;
+    }
+    this.lampGroup = grp;
+    this.root.add(grp);
+  }
+
+  _makeLampPost(postMat) {
+    const g = new THREE.Group();
+    const h = 4.2;
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, h, 8), postMat);
+    post.position.y = h / 2;
+    post.castShadow = true;
+    g.add(post);
+    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.22, 8), postMat);
+    shade.position.y = h + 0.06;
+    g.add(shade);
+    const bulbMat = new THREE.MeshStandardMaterial({ color: 0x5e5b4c, emissive: 0xffd98a, emissiveIntensity: 0 });
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.17, 10, 8), bulbMat);
+    bulb.position.y = h - 0.12;
+    g.add(bulb);
+    this.lampBulbs.push(bulbMat);
+    return g;
+  }
+
+  /** 街灯の点灯度合いを更新（night: 0=昼/消灯, 1=夜/全点灯） */
+  updateLamps(night) {
+    const n = clamp(night, 0, 1);
+    for (const m of this.lampBulbs) m.emissiveIntensity = n * 2.4;
+    for (const l of this.lampLights) l.intensity = n * 1.8;
   }
 
   /** サンプルの街（グリッド状の市街地）を生成 */
@@ -232,6 +342,7 @@ export class CityModel {
     }
 
     this._buildDestinations();
+    this._buildStreetLights();
     this.modelName = name;
     this.modelStats = {
       meshes: this.collisionMeshes.length,
@@ -342,6 +453,8 @@ export class CityModel {
     if (this.collisionHelper) this.collisionHelper.visible = show;
   }
 }
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // 決定的な擬似乱数（サンプル街の再現性確保）
 function mulberry32(a) {
