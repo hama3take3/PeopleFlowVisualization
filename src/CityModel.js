@@ -44,7 +44,11 @@ export class CityModel {
       });
     }
     this.collisionMeshes = [];
-    if (this.collisionHelper) { this.root.remove(this.collisionHelper); this.collisionHelper = null; }
+    if (this.collisionHelper) {
+      this.scene.remove(this.collisionHelper);
+      this.collisionHelper.children[0]?.material?.dispose(); // 共有マテリアルのみ破棄（geometryは元メッシュと共有）
+      this.collisionHelper = null;
+    }
     this.destinations = [];
   }
 
@@ -72,26 +76,36 @@ export class CityModel {
       } else {
         throw new Error(`未対応の形式です: .${ext}`);
       }
-      this.setModel(object, file.name);
+      // FBXは慣習的にcm単位のことが多いためメートルへ換算
+      this.setModel(object, file.name, { unitScale: ext === 'fbx' ? 0.01 : 1 });
     } finally {
       URL.revokeObjectURL(url);
     }
   }
 
-  /** 読み込んだ object を街として設定（正規化・衝突情報構築） */
-  setModel(object, name = 'model') {
+  /**
+   * 読み込んだ object を街として設定（接地・衝突情報構築）。
+   *
+   * 人と建物の縮尺を一致させるため、モデルは原則「実寸（メートル）」のまま扱う。
+   * （以前は一律160mに正規化していたため人物との縮尺が崩れていた）
+   * 単位が極端なモデルのみ、見やすい範囲へ穏やかに補正する。
+   */
+  setModel(object, name = 'model', opts = {}) {
     this.clear();
 
-    // FBX等は単位がcmのことがあるため、サイズで自動正規化する
+    // 単位換算（FBXのcm→m等）
+    const unit = opts.unitScale || 1;
+    if (unit !== 1) object.scale.multiplyScalar(unit);
     object.updateMatrixWorld(true);
+
+    // 実寸を計測。極端な場合のみ補正（人スケール1.7mを保つため通常は等倍）。
     const box = new THREE.Box3().setFromObject(object);
     const size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.z) || 1;
-
-    // 街の一辺をおよそ 160m に正規化（極端に大小なモデルでも扱いやすく）
-    const target = 160;
-    const scale = (maxDim > 0) ? target / maxDim : 1;
-    object.scale.multiplyScalar(scale);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    let scale = 1;
+    if (maxDim > 4000) scale = 2000 / maxDim;       // 巨大すぎ→約2km上限に
+    else if (maxDim < 8) scale = 30 / maxDim;        // 小さすぎ→約30mに拡大
+    if (scale !== 1) object.scale.multiplyScalar(scale);
     object.updateMatrixWorld(true);
 
     // 再計測して中心を原点、最下部を y=0 に接地
@@ -304,16 +318,26 @@ export class CityModel {
     return this.destinations[Math.floor(Math.random() * this.destinations.length)].clone();
   }
 
-  /** 衝突メッシュの可視化トグル */
+  /**
+   * 衝突メッシュの可視化トグル。
+   * 単純な直方体(AABB)ではなく、実際に衝突判定へ使用しているメッシュ形状そのものを
+   * ワイヤフレームで重ねて表示する（=メッシュに忠実）。
+   */
   showCollision(show) {
     if (show && !this.collisionHelper) {
       this.collisionHelper = new THREE.Group();
+      this.collisionHelper.name = 'collisionHelper';
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff5a5a, wireframe: true, transparent: true, opacity: 0.45
+      });
       for (const m of this.collisionMeshes) {
-        const bb = new THREE.Box3().setFromObject(m);
-        const helper = new THREE.Box3Helper(bb, 0xff5a5a);
-        this.collisionHelper.add(helper);
+        m.updateWorldMatrix(true, false);
+        const wf = new THREE.Mesh(m.geometry, mat); // ジオメトリを共有（破棄しない）
+        wf.matrixAutoUpdate = false;
+        wf.matrix.copy(m.matrixWorld);              // 元メッシュのワールド変換に一致
+        this.collisionHelper.add(wf);
       }
-      this.root.add(this.collisionHelper);
+      this.scene.add(this.collisionHelper);
     }
     if (this.collisionHelper) this.collisionHelper.visible = show;
   }

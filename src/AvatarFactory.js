@@ -52,29 +52,29 @@ export function createAvatar(typeIndex) {
   const bodyColor = t.color;
   const skin = t.skin;
 
-  // しゃがんだ高さ（子どもは低い）。各パーツの基準。
-  const legH = 0.42;
-  const torsoH = 0.5;
-  const headR = 0.16;
+  // 実寸ベースの体格（成人 scale=1.0 で全高 約1.72m）。各パーツの基準。
+  const legH = 0.90;     // 股下（足首〜腰）
+  const torsoH = 0.55;   // 胴（腰〜肩）
+  const headR = 0.13;    // 頭の基準（頭高 約0.25m）
 
   // --- 脚（歩行アニメ用にピボットを持たせる） ---
   const leftLeg = new THREE.Group();
-  leftLeg.position.set(-0.09, legH, 0);
-  leftLeg.add(box(0.14, legH, 0.16, DARK, 0, -legH / 2, 0));
+  leftLeg.position.set(-0.11, legH, 0);
+  leftLeg.add(box(0.17, legH, 0.18, DARK, 0, -legH / 2, 0));
   const rightLeg = new THREE.Group();
-  rightLeg.position.set(0.09, legH, 0);
-  rightLeg.add(box(0.14, legH, 0.16, DARK, 0, -legH / 2, 0));
+  rightLeg.position.set(0.11, legH, 0);
+  rightLeg.add(box(0.17, legH, 0.18, DARK, 0, -legH / 2, 0));
 
   // --- 胴体 ---
-  const torso = box(0.34, torsoH, 0.2, bodyColor, 0, legH + torsoH / 2, 0);
+  const torso = box(0.42, torsoH, 0.24, bodyColor, 0, legH + torsoH / 2, 0);
 
   // --- 腕 ---
   const leftArm = new THREE.Group();
-  leftArm.position.set(-0.21, legH + torsoH - 0.04, 0);
-  leftArm.add(box(0.08, 0.42, 0.1, bodyColor, 0, -0.2, 0));
+  leftArm.position.set(-0.26, legH + torsoH - 0.05, 0);
+  leftArm.add(box(0.09, 0.62, 0.11, bodyColor, 0, -0.31, 0));
   const rightArm = new THREE.Group();
-  rightArm.position.set(0.21, legH + torsoH - 0.04, 0);
-  rightArm.add(box(0.08, 0.42, 0.1, bodyColor, 0, -0.2, 0));
+  rightArm.position.set(0.26, legH + torsoH - 0.05, 0);
+  rightArm.add(box(0.09, 0.62, 0.11, bodyColor, 0, -0.31, 0));
 
   // --- 首・頭 ---
   const neckY = legH + torsoH;
@@ -97,7 +97,7 @@ export function createAvatar(typeIndex) {
     g.add(box(0.26, 0.34, 0.14, 0x394150, 0, legH + torsoH / 2 + 0.02, -0.16));
   }
   if (t.cane) {
-    const cane = box(0.03, 0.62, 0.03, 0x6b4f2a, 0.27, 0.31, 0.12);
+    const cane = box(0.03, 0.92, 0.03, 0x6b4f2a, 0.32, 0.46, 0.12);
     g.add(cane);
   }
   if (t.whiteCane) {
@@ -151,8 +151,8 @@ export function createAvatar(typeIndex) {
       s.add(w);
     }
     // ハンドル
-    s.add(box(0.04, 0.5, 0.04, METAL, -0.18, 0.5, -0.22));
-    s.add(box(0.04, 0.5, 0.04, METAL, 0.18, 0.5, -0.22));
+    s.add(box(0.04, 0.7, 0.04, METAL, -0.18, 0.6, -0.22));
+    s.add(box(0.04, 0.7, 0.04, METAL, 0.18, 0.6, -0.22));
     g.add(s);
     // 押している姿勢：腕を前に
     leftArm.rotation.x = rightArm.rotation.x = -1.0;
@@ -166,7 +166,8 @@ export function createAvatar(typeIndex) {
     type: t,
     typeIndex,
     limbs: { leftLeg, rightLeg, leftArm: t.stroller ? null : leftArm, rightArm: t.stroller ? null : rightArm },
-    headHeight: (neckY + headR) * t.scale,   // 一人称カメラの目線高さ
+    // 一人称カメラの目線高さ（車椅子は着座姿勢に合わせる）
+    headHeight: (t.wheelchair ? (legH * 0.55 + torsoH + headR) : (neckY + headR)) * t.scale,
     walkPhase: Math.random() * Math.PI * 2,
     animatable: !t.wheelchair                  // 車椅子は脚を振らない
   };

@@ -416,6 +416,9 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
+// デバッグ/外部連携用フック
+window.__viz = { camera, controls, city, crowd, sim, enterFPV, exitFPV };
+
 // 起動
 $('speed-label').textContent = '×' + sim.speed;
 updateClockLabels();
