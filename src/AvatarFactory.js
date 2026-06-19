@@ -168,6 +168,7 @@ export function createAvatar(typeIndex) {
     limbs: { leftLeg, rightLeg, leftArm: t.stroller ? null : leftArm, rightArm: t.stroller ? null : rightArm },
     // 一人称カメラの目線高さ（車椅子は着座姿勢に合わせる）
     headHeight: (t.wheelchair ? (legH * 0.55 + torsoH + headR) : (neckY + headR)) * t.scale,
+    hipHeight: legH * t.scale,   // 起立時の腰の高さ（着席時の沈み込み量計算に使用）
     walkPhase: Math.random() * Math.PI * 2,
     animatable: !t.wheelchair                  // 車椅子は脚を振らない
   };

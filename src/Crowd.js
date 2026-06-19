@@ -22,6 +22,7 @@ export class Crowd {
     scene.add(this.group);
 
     this.typeVisible = AVATAR_TYPES.map(() => true);
+    this.furniture = null;   // FurnitureManager（main側で注入）
 
     // 経路・目的地の可視化
     this.pathLine = null;
@@ -49,6 +50,7 @@ export class Crowd {
   /** 指定人数のダミー人流を生成 */
   generate(count = 500, simClock = 480) {
     this.dispose();
+    this.furniture?.releaseAllSeats();
     const proxyGeo = new THREE.CylinderGeometry(0.45, 0.45, 1.7, 6);
     const proxyMat = new THREE.MeshBasicMaterial({ visible: false });
 
@@ -80,6 +82,10 @@ export class Crowd {
         dwelling: false,
         groundTimer: Math.random(),
         manual: null,        // 一人称操作中の手動ベロシティ
+        sitState: null,      // null | 'going'（着席へ移動中） | 'sitting'（着席中）
+        seat: null,          // 確保した座席
+        sitMinsLeft: 0,      // 残り着席時間（sim分）
+        seekTimer: 2 + Math.random() * 12,  // 次に着席を試みるまでの秒
         info: {
           typeLabel: t.label,
           gender: t.gender,
@@ -133,7 +139,17 @@ export class Crowd {
 
   /** 時刻 t（分）に合わせて各歩行者を再配置（時刻スクラブ時に使用） */
   reseed(t) {
+    this.furniture?.releaseAllSeats();
     for (const a of this.agents) {
+      // 着席状態をクリア（姿勢も戻す）
+      if (a.sitState) {
+        const limbs = a.avatar.userData.limbs;
+        if (limbs.leftLeg) limbs.leftLeg.rotation.x = 0;
+        if (limbs.rightLeg) limbs.rightLeg.rotation.x = 0;
+      }
+      a.sitState = null;
+      a.seat = null;
+      a.sitMinsLeft = 0;
       const idx = this._currentIndex(a.schedule, t);
       const place = a.schedule[idx].pos;
       a.pos.copy(place);
@@ -159,12 +175,41 @@ export class Crowd {
     const speedFactor = timeScale <= 0 ? 0 : clamp(timeScale / 20, 0.25, 6);
 
     for (const a of this.agents) {
-      // スケジュールに沿って目的地を更新
-      const idx = this._currentIndex(a.schedule, simClock);
-      if (idx !== a._idx) {
-        a._idx = idx;
-        a.target.copy(a.schedule[idx].pos);
-        a.dwelling = false;
+      // 着席中：滞在時間を消費し、座り姿勢のまま固定（移動・スケジュールは凍結）
+      if (a.sitState === 'sitting') {
+        if (speedFactor > 0) {
+          // 観察できるよう実時間ベースで消費（時間の速さで緩やかに加速）
+          a.sitMinsLeft -= dt * clamp(timeScale / 60, 0.5, 4);
+          if (a.sitMinsLeft <= 0) this._standUp(a, simClock);
+        }
+        this._sync(a);
+        continue;
+      }
+
+      // スケジュールに沿って目的地を更新（着席へ向かう間は上書きしない）
+      if (a.sitState === null) {
+        const idx = this._currentIndex(a.schedule, simClock);
+        if (idx !== a._idx) {
+          a._idx = idx;
+          a.target.copy(a.schedule[idx].pos);
+          a.dwelling = false;
+        }
+        // 時々、近くの空席へ座りに行く
+        if (this.furniture && !a.manual && speedFactor > 0) {
+          a.seekTimer -= dt;
+          if (a.seekTimer <= 0) {
+            a.seekTimer = 8 + Math.random() * 18;
+            if (Math.random() < 0.5 && this.furniture.hasSeats()) {
+              const seat = this.furniture.getFreeSeatNear(a.pos, 28);
+              if (seat) {
+                seat.occupiedBy = a.id;
+                a.seat = seat;
+                a.sitState = 'going';
+                a.target.set(seat.x, this.city.groundY, seat.z);
+              }
+            }
+          }
+        }
       }
 
       if (speedFactor === 0 && !a.manual) {
@@ -176,18 +221,22 @@ export class Crowd {
 
       if (a.manual) {
         this._stepManual(a, dt, speedFactor);
+      } else if (a.sitState === 'going') {
+        this._stepToSeat(a, dt, speedFactor, simClock);
       } else {
         this._stepAuto(a, dt, speedFactor);
       }
 
-      // 接地（負荷分散のため間引いてサンプリング）
-      a.groundTimer -= dt;
-      if (a.groundTimer <= 0) {
-        a.pos.y = this.city.groundHeightAt(a.pos.x, a.pos.z);
-        a.groundTimer = 0.4 + Math.random() * 0.4;
+      // 着席を開始した場合は接地・歩行アニメをスキップ（座り姿勢を保持）
+      if (a.sitState !== 'sitting') {
+        // 接地（負荷分散のため間引いてサンプリング）
+        a.groundTimer -= dt;
+        if (a.groundTimer <= 0) {
+          a.pos.y = this.city.groundHeightAt(a.pos.x, a.pos.z);
+          a.groundTimer = 0.4 + Math.random() * 0.4;
+        }
+        animateAvatar(a.avatar, a.speed, dt);
       }
-
-      animateAvatar(a.avatar, a.speed, dt);
       this._sync(a);
     }
 
@@ -220,6 +269,66 @@ export class Crowd {
     const speed = a.baseSpeed * speedFactor;
     a.speed = speed;
     this._move(a, a.heading, speed * dt);
+  }
+
+  /** 座席へ向かう。到着したら着席を開始 */
+  _stepToSeat(a, dt, speedFactor, simClock) {
+    const toTarget = this._tmp.copy(a.target).sub(a.pos);
+    toTarget.y = 0;
+    if (toTarget.length() < 1.2) { this._startSitting(a); return; }
+    toTarget.normalize();
+    const desired = this._avoid(a, toTarget);
+    a.heading = lerpAngle(a.heading, Math.atan2(desired.x, desired.z), Math.min(1, dt * 6));
+    const speed = a.baseSpeed * speedFactor;
+    a.speed = speed;
+    this._move(a, a.heading, speed * dt);
+  }
+
+  /** 着席開始：座り姿勢へ。ランダムな滞在時間を設定 */
+  _startSitting(a) {
+    a.sitState = 'sitting';
+    a.dwelling = true;
+    a.speed = 0;
+    a.sitMinsLeft = 8 + Math.random() * 24;  // 滞在の長さ（×60時に約8〜32秒で観察可能）
+    a.pos.x = a.seat.x;
+    a.pos.z = a.seat.z;
+    a.pos.y = a.seat.groundY;
+    a.heading = a.seat.facing;
+    // 脚を前に曲げて着座姿勢に
+    const limbs = a.avatar.userData.limbs;
+    if (limbs.leftLeg) limbs.leftLeg.rotation.x = -1.4;
+    if (limbs.rightLeg) limbs.rightLeg.rotation.x = -1.4;
+  }
+
+  /** 起立：姿勢を戻してスケジュールへ復帰 */
+  _standUp(a, simClock) {
+    if (a.seat) a.seat.occupiedBy = null;
+    a.seat = null;
+    a.sitState = null;
+    a.sitMinsLeft = 0;
+    a.seekTimer = 12 + Math.random() * 20;
+    const limbs = a.avatar.userData.limbs;
+    if (limbs.leftLeg) limbs.leftLeg.rotation.x = 0;
+    if (limbs.rightLeg) limbs.rightLeg.rotation.x = 0;
+    a._idx = -1;  // 次フレームでスケジュール目的地を再評価
+  }
+
+  /** 指定座席に紐づく歩行者を強制的に起立させる（ファニチャー撤去時） */
+  evictFromSeats(seats) {
+    const set = new Set(seats);
+    for (const a of this.agents) {
+      if (a.seat && set.has(a.seat)) {
+        a.seat.occupiedBy = null;
+        a.seat = null;
+        a.sitState = null;
+        a.sitMinsLeft = 0;
+        a.seekTimer = 4 + Math.random() * 10;
+        const limbs = a.avatar.userData.limbs;
+        if (limbs.leftLeg) limbs.leftLeg.rotation.x = 0;
+        if (limbs.rightLeg) limbs.rightLeg.rotation.x = 0;
+        a._idx = -1;
+      }
+    }
   }
 
   /** 一人称操作中の手動移動（WASD） */
@@ -313,7 +422,17 @@ export class Crowd {
   _sync(a) {
     a.avatar.position.copy(a.pos);
     a.avatar.rotation.y = a.heading;
+    if (a.sitState === 'sitting' && a.seat) {
+      // 座面に腰が乗るよう沈み込ませる
+      const drop = Math.max(0, a.avatar.userData.hipHeight - a.seat.sitHeight);
+      a.avatar.position.y = a.pos.y - drop;
+    }
     a.proxy.position.set(a.pos.x, a.pos.y + 0.85, a.pos.z);
+  }
+
+  /** 着席中の歩行者を強制起立（一人称操作の開始時など） */
+  standAgent(a) {
+    if (a.sitState) this._standUp(a, 0);
   }
 
   /** 一人称カメラ用：頭部のワールド座標 */

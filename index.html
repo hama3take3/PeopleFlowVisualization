@@ -37,9 +37,14 @@
         <li><b>ホイール</b>：拡大・縮小（縮尺）</li>
         <li><b>アバターにマウスを合わせる</b>：属性を表示</li>
         <li><b>アバターをクリック</b>：一人称視点で街を体験</li>
-        <li><b>右クリック</b>：俯瞰視点に戻る</li>
+        <li><b>右クリック</b>：一人称中は俯瞰に戻る／通常時はファニチャー撤去</li>
         <li>一人称中は <b>WASD / 矢印</b> で自由歩行も可能</li>
       </ul>
+      <h3>ストリートファニチャー</h3>
+      <p>ベンチ・テーブル・パラソルを配置可能。ボタンで選び地面をクリックで設置、
+        <b>右クリックで撤去</b>。設置すると時々歩行者が座って休憩します。</p>
+      <h3>太陽</h3>
+      <p>時刻に応じて太陽（光源）が東→天頂→西へ移動し、朝夕は暖色、夜は暗くなります。</p>
       <h3>3Dモデルの読み込み</h3>
       <p>glTF / GLB / PLY / FBX に対応。<br />
         <a href="https://map.fleet.im/" target="_blank" rel="noopener">map.fleet.im</a>
@@ -67,6 +72,20 @@
         <button id="regen-crowd" class="btn">人流を再生成（ダミー）</button>
         <div class="muted">
           現状はダミーデータ。将来的にLiDAR / Agoop等の実データに対応予定。
+        </div>
+      </section>
+
+      <section>
+        <h3>ストリートファニチャー</h3>
+        <div class="furn-buttons">
+          <button class="btn furn-btn" data-furn="bench">ベンチ</button>
+          <button class="btn furn-btn" data-furn="table">テーブル</button>
+          <button class="btn furn-btn" data-furn="parasol">パラソル</button>
+        </div>
+        <div class="muted">
+          ボタン選択 → 地面をクリックで配置。<br />
+          配置物を<b>右クリックで撤去</b>。Escで配置モード解除。<br />
+          設置すると時々歩行者が座って休憩します。
         </div>
       </section>
 
@@ -103,6 +122,12 @@
 
     <!-- ホバー時の属性ツールチップ -->
     <div id="tooltip" class="tooltip hidden"></div>
+
+    <!-- ファニチャー配置モードのバナー -->
+    <div id="place-banner" class="fpv-banner hidden">
+      <span id="place-name">配置モード</span>
+      <span class="fpv-hint">地面をクリックで配置 / 右クリックで撤去 / Escで解除</span>
+    </div>
 
     <!-- 一人称モードのバナー -->
     <div id="fpv-banner" class="fpv-banner hidden">

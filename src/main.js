@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CityModel } from './CityModel.js';
 import { Crowd } from './Crowd.js';
 import { AVATAR_TYPES } from './AvatarFactory.js';
+import { FurnitureManager } from './Furniture.js';
 
 // =====================================================================
 //  シーン基盤
@@ -43,6 +44,8 @@ scene.add(sun.target);
 // =====================================================================
 const city = new CityModel(scene);
 const crowd = new Crowd(scene, city);
+const furniture = new FurnitureManager(scene, city);
+crowd.furniture = furniture;
 
 // シミュレーション状態
 const sim = {
@@ -102,6 +105,7 @@ let savedCam = null;
 
 function enterFPV(agent) {
   if (fpv.active) exitFPV(false);
+  crowd.standAgent(agent);   // 着席中なら起立させてから操作開始
   fpv.active = true;
   fpv.agent = agent;
   fpv.yaw = agent.heading;
@@ -202,10 +206,42 @@ function onPointerMove(e) {
 
 canvas.addEventListener('pointermove', onPointerMove);
 
-// 左クリック：アバター選択で一人称へ / FPV中はマウスルック開始
+// ファニチャー配置モード
+const placement = { type: null };
+function setPlacement(type) {
+  placement.type = (placement.type === type) ? null : type;
+  document.querySelectorAll('.furn-btn').forEach((b) =>
+    b.classList.toggle('active', b.dataset.furn === placement.type));
+  const banner = $('place-banner');
+  if (placement.type) {
+    $('place-name').textContent =
+      `配置モード：${({ bench: 'ベンチ', table: 'テーブル', parasol: 'パラソル' })[placement.type]}`;
+    banner.classList.remove('hidden');
+    canvas.style.cursor = 'copy';
+  } else {
+    banner.classList.add('hidden');
+    canvas.style.cursor = '';
+  }
+}
+
+// 地面（街メッシュ）との交点を求める
+function groundPointAt(clientX, clientY) {
+  pointer.x = (clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(city.root.children, true);
+  return hits.length ? hits[0].point : null;
+}
+
+// 左クリック：配置モードなら設置 / アバター選択で一人称へ / FPV中はマウスルック
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button === 0) {
     if (fpv.active) { fpv.manualLook = true; return; }
+    if (placement.type) {
+      const p = groundPointAt(e.clientX, e.clientY);
+      if (p) furniture.place(placement.type, p);
+      return;
+    }
     const agent = pickAgent(e.clientX, e.clientY);
     if (agent) enterFPV(agent);
   }
@@ -214,10 +250,20 @@ canvas.addEventListener('pointerup', (e) => {
   if (e.button === 0 && fpv.active) fpv.manualLook = false;
 });
 
-// 右クリック：俯瞰視点へ戻る
+// 右クリック：FPV中は俯瞰へ戻る / それ以外はカーソル下のファニチャーを撤去
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  if (fpv.active) exitFPV(true);
+  if (fpv.active) { exitFPV(true); return; }
+  const item = furniture.pickAt(e.clientX, e.clientY, camera);
+  if (item) furniture.remove(item, crowd);
+});
+
+// ファニチャーボタン
+document.querySelectorAll('.furn-btn').forEach((b) =>
+  b.addEventListener('click', () => setPlacement(b.dataset.furn)));
+// Escで配置モード解除
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && placement.type) setPlacement(null);
 });
 
 // FPV用キーボード
@@ -238,7 +284,9 @@ window.addEventListener('keyup', (e) => {
 const tooltipEl = document.getElementById('tooltip');
 function showTooltip(agent, x, y) {
   const i = agent.info;
-  const status = agent.dwelling ? '滞在中' : '移動中';
+  const status = agent.sitState === 'sitting' ? '着席・休憩中'
+    : agent.sitState === 'going' ? '着席へ移動中'
+    : agent.dwelling ? '滞在中' : '移動中';
   tooltipEl.innerHTML = `
     <div class="tt-title">${i.typeLabel}</div>
     <div class="tt-row"><span>性別</span><span>${i.gender}</span></div>
@@ -266,6 +314,7 @@ $('model-input').addEventListener('change', async (e) => {
   showLoading(`${file.name} を読み込み中...`);
   try {
     exitFPV(false);
+    furniture.clearAll(crowd);
     await city.loadFromFile(file);
     configureForCity();
     crowd.generate(getPopCount(), sim.clock);
@@ -283,6 +332,7 @@ $('load-sample').addEventListener('click', () => {
   showLoading('サンプルの街を生成中...');
   setTimeout(() => {
     exitFPV(false);
+    furniture.clearAll(crowd);
     city.generateSampleCity();
     configureForCity();
     crowd.generate(getPopCount(), sim.clock);
@@ -371,6 +421,42 @@ function updateClockLabels() {
 }
 
 // =====================================================================
+//  太陽（光源）の時刻連動
+// =====================================================================
+const _dayCol = new THREE.Color(0x0d141f);
+const _nightCol = new THREE.Color(0x05070d);
+const _tmpCol = new THREE.Color();
+const _sunDir = new THREE.Vector3();
+function updateSun(min) {
+  // 6:00で東の地平線、12:00で天頂、18:00で西の地平線
+  const a = (min - 360) / 720 * Math.PI;      // 0=6:00, π=18:00
+  const elev = Math.sin(a);                    // >0 で昼
+  const day = clamp(elev, 0, 1);
+  const r = (city.size || 150) * 1.4;
+  _sunDir.set(Math.cos(a), Math.max(0.06, elev), 0.33).normalize();
+  sun.position.set(
+    city.center.x + _sunDir.x * r,
+    city.groundY + _sunDir.y * r,
+    city.center.z + _sunDir.z * r
+  );
+  sun.target.position.copy(city.center);
+
+  // 強度（夜は弱い月明かり程度）
+  sun.intensity = 0.12 + day * 1.5;
+  hemi.intensity = 0.18 + day * 0.72;
+
+  // 地平線近くは暖色（朝焼け・夕焼け）
+  const warm = 1 - clamp(elev / 0.45, 0, 1);
+  _tmpCol.setRGB(1, 0.95 - warm * 0.32, 0.85 - warm * 0.5);
+  sun.color.copy(_tmpCol);
+
+  // 背景・フォグを昼夜で補間
+  _tmpCol.copy(_nightCol).lerp(_dayCol, day);
+  scene.background.copy(_tmpCol);
+  scene.fog.color.copy(_tmpCol);
+}
+
+// =====================================================================
 //  メインループ
 // =====================================================================
 const timer = new THREE.Timer();
@@ -385,6 +471,7 @@ function animate() {
     sim.clock = (sim.clock + dt * effScale) % 1440;
   }
   updateClockLabels();
+  updateSun(sim.clock);
 
   crowd.update(dt, sim.clock, effScale);
 
@@ -417,7 +504,7 @@ function lerpAngle(a, b, t) {
 }
 
 // デバッグ/外部連携用フック
-window.__viz = { camera, controls, city, crowd, sim, enterFPV, exitFPV };
+window.__viz = { camera, controls, city, crowd, furniture, sim, enterFPV, exitFPV, setPlacement, updateSun };
 
 // 起動
 $('speed-label').textContent = '×' + sim.speed;
