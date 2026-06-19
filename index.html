@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>人流 × 街3Dモデル 可視化ツール</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚶</text></svg>" />
+  <link rel="stylesheet" href="./src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene"></canvas>
+
+    <!-- ローディング表示 -->
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <div id="loading-text">読み込み中...</div>
+    </div>
+
+    <!-- 左上：タイトル＆操作ガイド -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">◴</span>
+        <div>
+          <div class="brand-title">PeopleFlow Viz</div>
+          <div class="brand-sub">まちづくりワークショップ用 人流可視化</div>
+        </div>
+      </div>
+      <button id="help-toggle" class="btn-ghost" title="操作方法">？</button>
+    </header>
+
+    <div id="help-panel" class="panel hidden">
+      <h3>操作方法</h3>
+      <ul>
+        <li><b>左ドラッグ</b>：視点の回転</li>
+        <li><b>右ドラッグ / 2本指</b>：平行移動</li>
+        <li><b>ホイール</b>：拡大・縮小（縮尺）</li>
+        <li><b>アバターにマウスを合わせる</b>：属性を表示</li>
+        <li><b>アバターをクリック</b>：一人称視点で街を体験</li>
+        <li><b>右クリック</b>：俯瞰視点に戻る</li>
+        <li>一人称中は <b>WASD / 矢印</b> で自由歩行も可能</li>
+      </ul>
+      <h3>3Dモデルの読み込み</h3>
+      <p>glTF / GLB / PLY / FBX に対応。<br />
+        <a href="https://map.fleet.im/" target="_blank" rel="noopener">map.fleet.im</a>
+        などからダウンロードした街・BIMモデルをインポートできます。</p>
+    </div>
+
+    <!-- 右上：データ・モデル操作 -->
+    <aside id="sidebar" class="panel">
+      <section>
+        <h3>街の3Dモデル</h3>
+        <label class="file-btn">
+          モデルを読み込む (glTF/GLB/PLY/FBX)
+          <input type="file" id="model-input" accept=".glb,.gltf,.ply,.fbx,.bin,.obj" />
+        </label>
+        <button id="load-sample" class="btn">サンプルの街を生成</button>
+        <div id="model-info" class="muted">モデル未読み込み</div>
+      </section>
+
+      <section>
+        <h3>人流データ</h3>
+        <div class="row">
+          <label for="pop-count">人数</label>
+          <input type="number" id="pop-count" min="50" max="2000" step="50" value="500" />
+        </div>
+        <button id="regen-crowd" class="btn">人流を再生成（ダミー）</button>
+        <div class="muted">
+          現状はダミーデータ。将来的にLiDAR / Agoop等の実データに対応予定。
+        </div>
+      </section>
+
+      <section>
+        <h3>表示</h3>
+        <label class="check"><input type="checkbox" id="toggle-paths" /> 移動経路を表示</label>
+        <label class="check"><input type="checkbox" id="toggle-dest" /> 目的地を表示</label>
+        <label class="check"><input type="checkbox" id="toggle-collision" /> 衝突メッシュを表示</label>
+      </section>
+
+      <section>
+        <h3>属性フィルタ</h3>
+        <div id="legend" class="legend"></div>
+      </section>
+    </aside>
+
+    <!-- 下部：時刻・速度コントロール -->
+    <footer id="timebar" class="panel">
+      <div class="time-readout">
+        <div id="clock" class="clock">08:00</div>
+        <button id="play-toggle" class="btn-play" title="再生 / 一時停止">⏸</button>
+      </div>
+      <div class="sliders">
+        <div class="slider-group">
+          <label for="time-slider">時刻 <span id="time-label">08:00</span></label>
+          <input type="range" id="time-slider" min="0" max="1439" step="1" value="480" />
+        </div>
+        <div class="slider-group">
+          <label for="speed-slider">時間の速さ <span id="speed-label">×60</span></label>
+          <input type="range" id="speed-slider" min="0" max="600" step="5" value="60" />
+        </div>
+      </div>
+    </footer>
+
+    <!-- ホバー時の属性ツールチップ -->
+    <div id="tooltip" class="tooltip hidden"></div>
+
+    <!-- 一人称モードのバナー -->
+    <div id="fpv-banner" class="fpv-banner hidden">
+      <span id="fpv-name">歩行者の一人称視点</span>
+      <span class="fpv-hint">右クリックで俯瞰視点に戻る</span>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

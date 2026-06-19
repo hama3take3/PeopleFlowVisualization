@@ -1,0 +1,18 @@
+{
+  "name": "people-flow-visualization",
+  "version": "1.0.0",
+  "description": "まちづくりワークショップ向け 人流 × 街3Dモデル 可視化ツール",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --host"
+  },
+  "dependencies": {
+    "three": "^0.184.0",
+    "three-mesh-bvh": "^0.9.1"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
+  }
+}

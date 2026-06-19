@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+
+# 動作確認用の一時ファイル
+smoke.mjs
+shot.mjs
+shot-*.png
+.DS_Store

@@ -1,0 +1,330 @@
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+// three-mesh-bvh による高速レイキャストを有効化
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+/**
+ * 街の3Dモデル（または BIM）の読み込み・正規化・衝突判定情報の構築を担う。
+ *
+ * - glTF / GLB / PLY / FBX / OBJ のインポートに対応
+ * - 読み込んだモデルを適切なスケール・接地に正規化
+ * - 衝突メッシュ（建物など）を抽出して BVH を構築
+ * - 地面高さの取得、歩行可能領域・目的地(POI)の算出
+ */
+export class CityModel {
+  constructor(scene) {
+    this.scene = scene;
+    this.root = new THREE.Group();
+    this.root.name = 'city';
+    scene.add(this.root);
+
+    this.collisionMeshes = [];      // 衝突判定対象（建物など）
+    this.collisionHelper = null;    // 衝突メッシュの可視化
+    this.bounds = new THREE.Box3(); // モデル全体のAABB
+    this.groundY = 0;               // 地面のおおよその高さ
+    this.size = 100;                // 街のおおよその一辺
+    this.center = new THREE.Vector3();
+    this.destinations = [];         // 目的地(POI)候補
+    this._raycaster = new THREE.Raycaster();
+    this._raycaster.firstHitOnly = true;
+  }
+
+  clear() {
+    for (const m of [...this.root.children]) {
+      this.root.remove(m);
+      m.traverse?.((o) => {
+        if (o.geometry) { o.geometry.disposeBoundsTree?.(); o.geometry.dispose(); }
+      });
+    }
+    this.collisionMeshes = [];
+    if (this.collisionHelper) { this.root.remove(this.collisionHelper); this.collisionHelper = null; }
+    this.destinations = [];
+  }
+
+  /** ファイル(File)からモデルを読み込む */
+  async loadFromFile(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    const url = URL.createObjectURL(file);
+    try {
+      let object;
+      if (ext === 'glb' || ext === 'gltf') {
+        const loader = new GLTFLoader();
+        const gltf = await loader.loadAsync(url);
+        object = gltf.scene;
+      } else if (ext === 'fbx') {
+        object = await new FBXLoader().loadAsync(url);
+      } else if (ext === 'ply') {
+        const geo = await new PLYLoader().loadAsync(url);
+        geo.computeVertexNormals();
+        const material = geo.hasAttribute('color')
+          ? new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true })
+          : new THREE.MeshStandardMaterial({ color: 0xb9c2cc, flatShading: true });
+        object = new THREE.Mesh(geo, material);
+      } else if (ext === 'obj') {
+        object = await new OBJLoader().loadAsync(url);
+      } else {
+        throw new Error(`未対応の形式です: .${ext}`);
+      }
+      this.setModel(object, file.name);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /** 読み込んだ object を街として設定（正規化・衝突情報構築） */
+  setModel(object, name = 'model') {
+    this.clear();
+
+    // FBX等は単位がcmのことがあるため、サイズで自動正規化する
+    object.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.z) || 1;
+
+    // 街の一辺をおよそ 160m に正規化（極端に大小なモデルでも扱いやすく）
+    const target = 160;
+    const scale = (maxDim > 0) ? target / maxDim : 1;
+    object.scale.multiplyScalar(scale);
+    object.updateMatrixWorld(true);
+
+    // 再計測して中心を原点、最下部を y=0 に接地
+    const box2 = new THREE.Box3().setFromObject(object);
+    const center = box2.getCenter(new THREE.Vector3());
+    object.position.x -= center.x;
+    object.position.z -= center.z;
+    object.position.y -= box2.min.y;
+    object.updateMatrixWorld(true);
+
+    object.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+        if (o.geometry && !o.geometry.boundsTree) {
+          o.geometry.computeBoundsTree();
+        }
+      }
+    });
+
+    this.root.add(object);
+    this._finalizeBounds(name);
+  }
+
+  /** サンプルの街（グリッド状の市街地）を生成 */
+  generateSampleCity() {
+    this.clear();
+    const grp = new THREE.Group();
+
+    const blockSize = 18;     // 街区サイズ
+    const road = 8;           // 道路幅
+    const grid = 5;           // 5x5 街区
+    const cell = blockSize + road;
+    const extent = grid * cell;
+    const half = extent / 2;
+
+    // 地面
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(extent + 40, extent + 40),
+      new THREE.MeshStandardMaterial({ color: 0x3a4250, roughness: 1 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    grp.add(ground);
+
+    // 道路（明るいライン）
+    const roadMat = new THREE.MeshStandardMaterial({ color: 0x586072 });
+    for (let i = 0; i <= grid; i++) {
+      const pos = -half + i * cell - road;
+      const hRoad = new THREE.Mesh(new THREE.PlaneGeometry(extent + 40, road), roadMat);
+      hRoad.rotation.x = -Math.PI / 2;
+      hRoad.position.set(0, 0.02, pos + road / 2);
+      grp.add(hRoad);
+      const vRoad = new THREE.Mesh(new THREE.PlaneGeometry(road, extent + 40), roadMat);
+      vRoad.rotation.x = -Math.PI / 2;
+      vRoad.position.set(pos + road / 2, 0.02, 0);
+      grp.add(vRoad);
+    }
+
+    // 建物
+    const palette = [0x8d99ae, 0x9aa7b8, 0xb0bac7, 0x7f8ca0, 0xa7b0bd, 0xc2b8a8];
+    const dests = [];
+    let rng = mulberry32(20240619);
+    for (let gx = 0; gx < grid; gx++) {
+      for (let gz = 0; gz < grid; gz++) {
+        const cx = -half + gx * cell + blockSize / 2;
+        const cz = -half + gz * cell + blockSize / 2;
+        // 1街区に1〜4棟
+        const n = 1 + Math.floor(rng() * 3);
+        for (let b = 0; b < n; b++) {
+          const bw = 4 + rng() * (blockSize / 2 - 2);
+          const bd = 4 + rng() * (blockSize / 2 - 2);
+          const bh = 6 + rng() * 34;
+          const ox = (rng() - 0.5) * (blockSize - bw - 1);
+          const oz = (rng() - 0.5) * (blockSize - bd - 1);
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(bw, bh, bd),
+            new THREE.MeshStandardMaterial({ color: palette[Math.floor(rng() * palette.length)], roughness: 0.85 })
+          );
+          mesh.position.set(cx + ox, bh / 2, cz + oz);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          mesh.geometry.computeBoundsTree();
+          grp.add(mesh);
+          // 建物の出入口付近を目的地候補に
+          dests.push(new THREE.Vector3(
+            cx + ox + (rng() - 0.5) * bw,
+            0,
+            cz + oz + bd / 2 + 1.5
+          ));
+        }
+        // 広場・公園的な目的地も
+        if (rng() > 0.6) dests.push(new THREE.Vector3(cx, 0, cz));
+      }
+    }
+
+    this.root.add(grp);
+    this._presetDestinations = dests;
+    this._finalizeBounds('サンプルの街（自動生成）');
+  }
+
+  /** 衝突メッシュ抽出・境界算出・目的地生成の最終処理 */
+  _finalizeBounds(name) {
+    this.root.updateMatrixWorld(true);
+    this.bounds.setFromObject(this.root);
+    this.bounds.getCenter(this.center);
+    const size = this.bounds.getSize(new THREE.Vector3());
+    this.size = Math.max(size.x, size.z);
+    this.groundY = this.bounds.min.y;
+
+    // 衝突メッシュ＝面積の大きい/縦に伸びたメッシュ（=建物・構造物）を採用。
+    // ほぼ平らで広いメッシュ（地面）は歩行可能面として扱い、衝突からは除外。
+    this.collisionMeshes = [];
+    this.root.traverse((o) => {
+      if (!o.isMesh) return;
+      const bb = new THREE.Box3().setFromObject(o);
+      const s = bb.getSize(new THREE.Vector3());
+      const isGroundLike = s.y < this.size * 0.02 && (s.x > this.size * 0.4 || s.z > this.size * 0.4);
+      if (!isGroundLike) this.collisionMeshes.push(o);
+    });
+    // 万一すべて地面判定になった場合は全メッシュを対象に
+    if (this.collisionMeshes.length === 0) {
+      this.root.traverse((o) => { if (o.isMesh) this.collisionMeshes.push(o); });
+    }
+
+    this._buildDestinations();
+    this.modelName = name;
+    this.modelStats = {
+      meshes: this.collisionMeshes.length,
+      size: Math.round(this.size)
+    };
+  }
+
+  /** 目的地(POI)候補を構築。プリセットがあれば優先、無ければ建物周辺をサンプリング */
+  _buildDestinations() {
+    this.destinations = [];
+    if (this._presetDestinations && this._presetDestinations.length) {
+      this.destinations = this._presetDestinations.filter((p) => this.inBounds(p));
+      this._presetDestinations = null;
+    }
+    // 不足分は衝突メッシュ（建物）の周囲をサンプリングして補う
+    const need = 40;
+    if (this.destinations.length < need && this.collisionMeshes.length) {
+      for (let i = 0; this.destinations.length < need && i < 400; i++) {
+        const mesh = this.collisionMeshes[i % this.collisionMeshes.length];
+        const bb = new THREE.Box3().setFromObject(mesh);
+        const c = bb.getCenter(new THREE.Vector3());
+        const s = bb.getSize(new THREE.Vector3());
+        const ang = Math.random() * Math.PI * 2;
+        const r = Math.max(s.x, s.z) * 0.5 + 2 + Math.random() * 3;
+        const p = new THREE.Vector3(c.x + Math.cos(ang) * r, 0, c.z + Math.sin(ang) * r);
+        if (this.inBounds(p) && !this.isInsideBuilding(p)) this.destinations.push(p);
+      }
+    }
+    // それでも不足ならグリッド状に配置
+    if (this.destinations.length < 8) {
+      const r = this.size * 0.4;
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        this.destinations.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r));
+      }
+    }
+  }
+
+  inBounds(p) {
+    const m = this.size * 0.5 * 0.98;
+    return Math.abs(p.x - this.center.x) < m && Math.abs(p.z - this.center.z) < m;
+  }
+
+  /** 指定XZ位置が建物内部か（上方からのレイで建物に当たるか）を判定 */
+  isInsideBuilding(p) {
+    this._raycaster.set(
+      new THREE.Vector3(p.x, this.groundY + 0.4, p.z),
+      new THREE.Vector3(0, 1, 0)
+    );
+    this._raycaster.far = 200;
+    const hits = this._raycaster.intersectObjects(this.collisionMeshes, true);
+    // 真上に建物の天井がある＝建物内部
+    return hits.length > 0 && hits[0].distance < 100;
+  }
+
+  /** 指定XZの地面高さを取得（無ければ groundY） */
+  groundHeightAt(x, z) {
+    this._raycaster.set(new THREE.Vector3(x, this.groundY + 500, z), new THREE.Vector3(0, -1, 0));
+    this._raycaster.far = 1000;
+    const hits = this._raycaster.intersectObjects(this.root.children, true);
+    for (const h of hits) {
+      // 建物の屋根ではなく地面を拾いたいので、低い方の交点を採用
+      if (h.point.y <= this.groundY + this.size * 0.02 + 0.5) return h.point.y;
+    }
+    return this.groundY;
+  }
+
+  /** ランダムな歩行可能スポーン地点 */
+  randomWalkablePoint() {
+    const m = this.size * 0.45;
+    for (let i = 0; i < 30; i++) {
+      const p = new THREE.Vector3(
+        this.center.x + (Math.random() - 0.5) * 2 * m,
+        0,
+        this.center.z + (Math.random() - 0.5) * 2 * m
+      );
+      if (!this.isInsideBuilding(p)) { p.y = this.groundY; return p; }
+    }
+    return new THREE.Vector3(this.center.x, this.groundY, this.center.z);
+  }
+
+  randomDestination() {
+    if (!this.destinations.length) return this.randomWalkablePoint();
+    return this.destinations[Math.floor(Math.random() * this.destinations.length)].clone();
+  }
+
+  /** 衝突メッシュの可視化トグル */
+  showCollision(show) {
+    if (show && !this.collisionHelper) {
+      this.collisionHelper = new THREE.Group();
+      for (const m of this.collisionMeshes) {
+        const bb = new THREE.Box3().setFromObject(m);
+        const helper = new THREE.Box3Helper(bb, 0xff5a5a);
+        this.collisionHelper.add(helper);
+      }
+      this.root.add(this.collisionHelper);
+    }
+    if (this.collisionHelper) this.collisionHelper.visible = show;
+  }
+}
+
+// 決定的な擬似乱数（サンプル街の再現性確保）
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
